@@ -1,5 +1,5 @@
 # stat443-finalproject
-Final Project for STAT 443: Statistical Consulting
+Final Project for STAT 443: Statistical Consulting at University of Illinois: Urbana-Champaign
 
 This is the code submitted to 84.51 as the basis for recommendations on how Kroger can better understand their customers and target specific demographics through their merchandise. 
 
