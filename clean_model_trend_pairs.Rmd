@@ -1,0 +1,385 @@
+---
+title: "8451_Proj"
+author: "Sahil Kumar"
+date: "2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(randomForest)
+library(lubridate)
+library(ggplot2)
+library(forecast)
+library(plyr)
+
+set.seed(42)
+```
+
+
+### DATA CLEANING
+
+
+```{r Load Datasets}
+households = read.csv("5000_households.csv")
+transactions <- read.csv("5000_transactions.csv")
+products <- read.csv("5000_products.csv")
+```
+
+```{r Clean Household Data}
+
+#remove weird spacing issue
+households$AGE_RANGE = gsub(pattern = "(\\s)*$", replacement = "", x = households$AGE_RANGE)
+households$MARITAL = gsub(pattern = "(\\s)*$", replacement = "", x = households$MARITAL)
+households$INCOME_RANGE = gsub(pattern = "(\\s)*$", replacement = "", x = households$INCOME_RANGE)
+households$HOMEOWNER = gsub(pattern = "(\\s)*$", replacement = "", x = households$HOMEOWNER)
+households$HSHD_COMPOSITION = gsub(pattern = "(\\s)*$", replacement = "", x = households$HSHD_COMPOSITION)
+households$HH_SIZE = gsub(pattern = "(\\s)*$", replacement = "", x = households$HH_SIZE)
+
+#HSHD_NUM
+
+#L
+
+households$AGE_RANGE =ifelse(households$AGE_RANGE == "null", NA, households$AGE_RANGE)
+households$AGE_RANGE =ifelse(households$AGE_RANGE == "NOT AVAILABLE", NA, households$AGE_RANGE)
+
+households$MARITAL =ifelse(households$MARITAL == "null", NA, households$MARITAL)
+households$MARITAL =ifelse(households$MARITAL == "Unknown", NA, households$MARITAL)
+households$MARITAL =ifelse(households$HSHD_COMPOSITION == "Single Male", "Single", households$MARITAL)
+households$MARITAL =ifelse(households$HSHD_COMPOSITION == "Single Female", "Single", households$MARITAL)
+
+households$INCOME_RANGE =ifelse(households$INCOME_RANGE == "null", NA, households$INCOME_RANGE)
+
+households$HOMEOWNER =ifelse(households$HOMEOWNER == "null", "Unknown", households$HOMEOWNER)
+households$HOMEOWNER =ifelse(households$HOMEOWNER == "Unknown", NA, households$HOMEOWNER)
+
+households$HSHD_COMPOSITION =ifelse(households$HSHD_COMPOSITION == "NA", NA, households$HSHD_COMPOSITION)
+households$HSHD_COMPOSITION =ifelse(households$HSHD_COMPOSITION == "null", NA, households$HSHD_COMPOSITION)
+
+households$HH_SIZE =ifelse(households$HH_SIZE == "null", NA, households$HH_SIZE)
+
+households$CHILDREN =ifelse(households$CHILDREN == "NOT AVAILABLE", NA, households$CHILDREN)
+households$CHILDREN =ifelse(households$CHILDREN == "null", NA, households$CHILDREN)
+households$CHILDREN =ifelse(households$HSHD_COMPOSITION == "1 Adult", 0, households$CHILDREN)
+households$CHILDREN =ifelse(households$HSHD_COMPOSITION == "2 Adults", 0, households$CHILDREN)
+households$CHILDREN =ifelse(households$HSHD_COMPOSITION == "Single Male", 0, households$CHILDREN)
+households$CHILDREN =ifelse(households$HSHD_COMPOSITION == "Single Female", 0, households$CHILDREN)
+
+
+#weird anomolies/assumptions 
+#households$MARITAL =ifelse((households$HSHD_COMPOSITION == "2 Adults" & households$HOMEOWNER == "Homeowner"), "Married", households$MARITAL) #if 2 adults buy a house theyre probably married TODO: make this so its not overlaying others that actually responded
+households$MARITAL =ifelse((households$HSHD_COMPOSITION == "1 Adult" & is.na(households$MARITAL)), "Single", households$MARITAL) #if it's just one person we're assuming marital is single.
+households$MARITAL =ifelse((households$HSHD_COMPOSITION == "1 Adult and Kids" & is.na(households$MARITAL)), "Single", households$MARITAL) 
+households$MARITAL =ifelse((households$HSHD_COMPOSITION == "2 Adults" & households$AGE_RANGE == "75+" & is.na(households$MARITAL)), "Married", households$MARITAL) #statistically unlikely that older adults are living together as roommates
+households$MARITAL =ifelse((households$HSHD_COMPOSITION == "2 Adults and Kids" & is.na(households$MARITAL)), "Married", households$MARITAL) #if its 2 adults and a kid we're assuming married to keep sections consistent.
+households = households[!(households$HSHD_NUM == 1549),] #should already be removed but removing just in case cause it's 3 adults.
+#households$MARITAL = ifelse(households$HSHD_NUM == 4041, "Single", households$MARITAL) #probably just some kids
+households = households[!(households$HSHD_NUM == 2781),] #1500 a month on alcohol as a single adult was an outlier.
+households = households[!(households$HSHD_NUM == 2775),] #5000 a month on groceries with 100-150k income was an outlier.
+
+
+#drop rows with too many NA's. If between 0 and 0, removes any rows with NA's
+households = households[between(rowSums(is.na(households)) , 0, 0), ]
+```
+
+```{r Sample Households}
+#samp_houses = sample(households$HSHD_NUM, 500)
+#households = households[households$HSHD_NUM %in% samp_houses, ]
+#households = households[households$HSHD_NUM %in% unique(sample_houses$HSHD_NUM), ] #
+#transactions = transactions[transactions$HSHD_NUM %in% samp_houses, ]
+```
+
+```{r Clean Transaction Data}
+#BASKET_NUM
+
+#HSHD_NUM
+
+transactions$PURCHASE_ <- as.Date(transactions$PURCHASE_, "%d-%B-%y")
+transactions$DAY = day(transactions$PURCHASE_)
+transactions$MONTH = month(transactions$PURCHASE_)
+transactions$MONTH_NUM = ifelse(transactions$YEAR == 2017, (transactions$MONTH + 12), transactions$MONTH)
+#transactions$DAY_NUM = 
+
+#PRODUCT_NUM
+
+transactions = transactions[!(transactions$SPEND <= 0),]
+
+transactions = transactions[!(transactions$UNITS <= 0),]
+#transactions[which(transactions$UNITS >= 100), ]
+
+transactions$STORE_R = gsub(pattern = "(\\s)*$", replacement = "", x = transactions$STORE_R)
+
+#WEEK_NUM
+
+#YEAR
+```
+
+```{r Clean Product Data}
+#PRODUCT_NUM
+
+products$DEPARTMENT = gsub(pattern = "(\\s)*$", replacement = "", x = products$DEPARTMENT)
+products = products[(products$DEPARTMENT != "PHARMA"),]
+
+products$COMMODITY = gsub(pattern = "(\\s)*$", replacement = "", x = products$COMMODITY)
+
+products$BRAND_TY = gsub(pattern = "(\\s)*$", replacement = "", x = products$BRAND_TY)
+
+#NA.
+```
+
+```{r Merge Data}
+merged_data = merge(households, transactions, by = "HSHD_NUM")
+merged_data = merge(merged_data, products, by = "PRODUCT_NUM")
+```
+
+```{r Ensure Datasets Match}
+households = households[households$HSHD_NUM %in% unique(merged_data$HSHD_NUM), ]
+transactions = transactions[transactions$HSHD_NUM %in% unique(merged_data$HSHD_NUM), ]
+transactions = transactions[transactions$PRODUCT_NUM %in% unique(merged_data$PRODUCT_NUM), ]
+products = products[products$PRODUCT_NUM %in% unique(merged_data$PRODUCT_NUM), ]
+```
+
+```{r Write Cleaned Datasets}
+write.csv(merged_data, "full.csv")
+write.csv(households, "households.csv")
+write.csv(transactions, "transactions.csv")
+write.csv(products, "products.csv")
+```
+
+```{r Clean Garbage}
+rm(merged_data)
+gc()
+```
+
+
+### DATA PREPROCESSING
+
+
+```{r Load Cleaned Datasets}
+df_ = read.csv("full.csv", row.names = 1)
+households_ = read.csv("households.csv", row.names = 1)
+transactions_ <- read.csv("transactions.csv", row.names = 1)
+products_ <- read.csv("products.csv", row.names = 1)
+```
+
+```{r RESET}
+df = df_
+households = households_
+transactions = transactions_
+products = products_
+```
+
+```{r Model Data}
+spend = aggregate(SPEND ~ HSHD_NUM + MONTH + STORE_R, df, sum) 
+spend = merge(spend, households, by = "HSHD_NUM")
+spend$MONTH = revalue(factor(spend$MONTH), c("1"= "Jan","2"= "Feb","3"= "Mar","4"= "Apr","5"= "May","6"= "Jun","7"= "Jul","8"= "Aug","9"= "Sep","10"= "Oct","11"= "Nov","12"= "Dec"))
+train_houses = sample(unique(spend$HSHD_NUM), 3000)
+```
+
+```{r Elastic Net Train/Test}
+dmy = dummyVars(" ~ .", spend) #one hot encoding
+en_df = data.frame(predict(dmy, newdata = spend)) #make dataset with one hot encoding
+
+en_df$LN <- NULL #if we already have loyalty yes (LY) that means we dont need no (LN)
+en_df$MARITALSingle <- NULL
+en_df$HOMEOWNERHomeowner <- NULL
+
+en_tr = en_df[en_df$HSHD_NUM %in% train_houses, ]
+en_ts = en_df[!(en_df$HSHD_NUM %in% train_houses),]
+
+en_X_trn = en_tr[-c(1,18)]
+en_y_trn = en_tr["SPEND"]
+
+en_X_tst = en_ts[-c(1,18)]
+en_y_tst = en_ts["SPEND"]
+```
+
+```{r Random Forest Train/Test}
+rf_tr = spend[spend$HSHD_NUM %in% train_houses, ]
+rf_ts = spend[!(spend$HSHD_NUM %in% train_houses),]
+
+rf_X_trn = rf_tr[-c(1,4)]
+rf_X_trn = lapply(rf_X_trn, as.factor)
+rf_y_trn = rf_tr["SPEND"]
+rf_trn = cbind(rf_y_trn,rf_X_trn)
+
+rf_X_tst = rf_ts[-c(1, 4)]
+rf_X_tst = lapply(rf_X_tst, as.factor)
+rf_y_tst = rf_ts["SPEND"]
+```
+
+
+### REGRESSION MODELING
+
+
+```{r}
+en_mod = cv.glmnet(as.matrix(en_X_trn), as.matrix(en_y_trn), alpha = .5)
+best.lam = en_mod$lambda.1se
+en_pred = predict(en_mod, s = best.lam, newx = as.matrix(en_X_tst))
+en_err = sqrt(mean((en_pred - en_y_tst$SPEND)^2))
+print(en_err)
+
+coef.1se = predict(en_mod, s = en_mod$lambda.1se, type="coefficients")
+var.sel = row.names(coef.1se)[nonzeroCoef(coef.1se)[-1]]
+var.sel
+```
+
+```{r}
+rf_mod = randomForest(SPEND ~ ., data = rf_trn, importance = T, ntree=100)
+rf_pred = predict(rf_mod, rf_X_tst) 
+rf_err = sqrt(mean((rf_pred - rf_y_tst$SPEND)^2))
+print(rf_err)
+
+imp = importance(rf_mod, scale = TRUE)
+imp[order("IncNodePurity"),]
+imp
+```
+
+```{r}
+temp = data.frame(x = en_y_tst$SPEND, y = en_pred)
+ggplot(temp, aes(x = x, y = X1))+
+  theme_classic() + 
+  geom_point(color = "darkcyan", shape = 21, size = 1) +
+  labs(title = "Actual Monthly Expenditure vs Elastic Net Prediction (Test)",
+       x = "$ Actual", y = "$ Predicted") +
+  theme(legend.title=element_blank())
+```
+
+```{r}
+temp = data.frame(x = rf_y_tst$SPEND, y = rf_pred)
+ggplot(temp, aes(x = x, y = y))+
+  theme_classic() + 
+  geom_point(color = "darkcyan", shape = 21, size = 1) +
+  labs(title = "Actual Monthly Expenditure vs Random Forest Prediction (Train)",
+       x = "$ Actual", y = "$ Predicted") +
+  theme(legend.title=element_blank())
+```
+
+```{r}
+en_mod = glmnet(as.matrix(en_X_trn), as.matrix(en_y_trn), alpha = .5)
+plot(en_mod, label=TRUE, xvar = "lambda")
+```
+
+```{r}
+varImpPlot(rf_mod, type=1)
+varImpPlot(rf_mod, type=2)
+```
+
+
+### TIME SERIES MODELING
+
+
+```{r}
+spend = aggregate(SPEND ~ YEAR + MONTH, df, mean)
+```
+
+```{r}
+trn.ts <- ts(spend$SPEND, start=c(2016, 1), frequency = 12)
+tslm_mod = tslm(trn.ts~trend + season)
+f1 = forecast(tslm_mod, h = 12)
+plot(f1, main = "Forecasts for 2018")
+```
+
+```{r}
+tslm_mod = tslm(diff(trn.ts)~trend + season)
+f1 = forecast(tslm_mod, h = 12)
+plot(f1, main = "Forecasts for 2018, Adjusted")
+```
+
+```{r}
+trn.ts = ts(spend[spend$YEAR == 2016,]$SPEND, start=c(2016, 1), frequency = 12)
+tst.ts <- ts(spend[spend$YEAR == 2017,]$SPEND, start=c(2017, 1), frequency = 12)
+tslm_mod = tslm(trn.ts ~ season)
+f1 = forecast(tslm_mod, h = 12)
+accuracy(f1, tst.ts)
+plot(f1, main = "Forecasts for 2017, Seasonal")
+lines(tst.ts)
+```
+
+```{r}
+tslm_mod = tslm(trn.ts ~ trend)
+f1 = forecast(tslm_mod, h = 12)
+accuracy(f1, tst.ts)
+plot(f1, main = "Forecasts for 2017, Trend")
+lines(tst.ts)
+```
+
+
+### TREND GRAPHING
+
+
+```{r}
+sample_spend = aggregate(SPEND ~ HSHD_NUM + MONTH_NUM, df, sum) #can add DEPARTMENT, COMMODITY, STORE_R, etc and change in vari to make graphs based on those
+households = households[households$HSHD_NUM %in% unique(sample_spend$HSHD_NUM),]
+sample_spend = merge(sample_spend, households, by = "HSHD_NUM")
+
+month_nums = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
+                "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24")
+month_name = rep(c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),2)
+```
+
+```{r}
+vari = sample_spend$MARITAL
+temp = aggregate(SPEND ~ vari + MONTH_NUM, sample_spend, mean)
+ggplot(data = temp, aes(x = MONTH_NUM, y = SPEND, group = vari))+
+  theme_classic() + 
+  geom_line(aes(color=vari)) +
+  geom_point() +
+  scale_x_discrete(limits = month_nums, labels = month_name) +
+  labs(title = "Average Monthly Expenditure Based on 'vari' ",
+       x = "Month", y = "$ Spent") +
+  theme(legend.title=element_blank())
+```
+
+
+### BASKET PAIRINGS
+
+
+```{r}
+item_combo = df[c("BASKET_NUM", "COMMODITY")]
+item_combo = item_combo[!(item_combo$COMMODITY == "GROCERY STAPLE"),] #use if don't want grocery staple items
+u_item = unique(item_combo)
+```
+
+```{r}
+temp = u_item[between(u_item$BASKET_NUM , 1, 50), ]
+temp1= unique(merge(temp, temp, by='BASKET_NUM'))
+temp1= subset(temp1, COMMODITY.x!=COMMODITY.y)
+temp1= temp1[c(2,3)]
+whole= data.frame(table(temp1))
+
+for(i in 2:6399){
+  if(i%%100 == 0){
+    print(i)
+  }
+  temp = u_item[between(u_item$BASKET_NUM , (100*(i-1) + 1), (i*100)), ]
+  temp1=unique(merge(temp, temp, by='BASKET_NUM'))
+  temp1=subset(temp1, COMMODITY.x!=COMMODITY.y)
+  temp1=temp1[c(2,3)]
+  temp1=data.frame(table(temp1))
+  temp1 = merge(whole, temp1, by= c("COMMODITY.x", "COMMODITY.y"), all.x=TRUE)
+  whole = transform(whole, Freq = rowSums(temp1[, 3:4], na.rm = TRUE))  
+}
+
+whole_temp = whole
+
+whole_temp = data.frame(t(apply(whole_temp, 1, sort)))
+colnames(whole_temp) = c("Frequency_of_Combo", "Item_1", "Item_2")
+whole_temp=subset(whole_temp, Item_1!=Item_2)
+whole_temp=whole_temp[!duplicated(whole_temp), ]
+
+#temp1[temp1$Freq == max(temp1$Freq), ]
+#write.csv(whole_temp, "combo_freq.csv")
+```
+
+
+
+
+
+
+
+
